@@ -1,0 +1,220 @@
+esphome:
+  name: esp32-s3-game
+  friendly_name: Simulator Game Console
+
+# --- 1. CORE HARDWARE & MEMORY ---
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+  flash_size: 8MB
+
+psram:
+  mode: quad
+  speed: 40MHz
+
+logger:
+  baud_rate: 115200
+
+# --- 2. NETWORK & HOME ASSISTANT ---
+api:
+  encryption:
+    key: "56MdPFpXTjL9diLmWwcKQtN5+bY+efGcAkzcL7Ku0N0="
+
+ota:
+  - platform: esphome
+    password: "ed31988f576e770cc777bd1cff034e5b"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  ap:
+    ssid: "Esp32-S3 Fallback Hotspot"
+    password: "dHeDzsE31chm"
+
+captive_portal:
+
+# --- 3. GAME CONTROLLERS (UPDATE PINS IF NEEDED) ---
+sensor:
+  - platform: rotary_encoder
+    id: player_paddle
+    name: "Rotary Encoder"
+    pin_a: GPIO4  # <--- Encoder DT/A
+    pin_b: GPIO5  # <--- Encoder CLK/B
+    min_value: 0
+    max_value: 190 # 240 screen width minus 50 paddle width
+    resolution: 2
+
+binary_sensor:
+  - platform: gpio
+    id: btn_start
+    pin:
+      number: GPIO6 # <--- Encoder Push Button
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - lambda: |-
+          if (id(game_state) == 0 || id(game_state) == 2) {
+            // Reset and start game
+            id(game_state) = 1;
+            id(ball_x) = 120;
+            id(ball_y) = 20;
+            id(ball_dx) = 4;
+            id(ball_dy) = 4; 
+            id(score) = 0;
+          }
+
+  - platform: gpio
+    id: btn_k0
+    pin:
+      number: GPIO3 # <--- K0 Button
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - lambda: |-
+          if (id(game_state) == 1) {
+            id(game_state) = 3; // Pause
+          } else if (id(game_state) == 3) {
+            id(game_state) = 1; // Resume
+          }
+
+# --- 4. FONTS & HARDWARE BUS ---
+font:
+  - file: "Roboto_Condensed-Bold.ttf"
+    id: font_main
+    size: 20
+  - file: "Roboto_Condensed-Bold.ttf"
+    id: font_large
+    size: 40
+
+spi:
+  clk_pin: GPIO12
+  mosi_pin: GPIO11
+
+output:
+  - platform: gpio
+    pin: GPIO7
+    id: backlight_out
+
+light:
+  - platform: binary
+    output: backlight_out
+    name: "Display Backlight"
+    restore_mode: ALWAYS_ON
+
+# --- 5. GAME ENGINE VARIABLES ---
+globals:
+  - id: game_state
+    type: int
+    initial_value: '0' # 0: Start, 1: Playing, 2: Game Over, 3: Paused
+  - id: score
+    type: int
+    initial_value: '0'
+  - id: ball_x
+    type: float
+    initial_value: '120.0'
+  - id: ball_y
+    type: float
+    initial_value: '20.0'
+  - id: ball_dx
+    type: float
+    initial_value: '4.0'
+  - id: ball_dy
+    type: float
+    initial_value: '4.0'
+
+# --- 6. THE GAME RENDERER ---
+display:
+  - platform: ili9xxx
+    model: ST7789V
+    id: tft
+    cs_pin: GPIO8
+    dc_pin: GPIO9
+    reset_pin: GPIO10
+    
+    invert_colors: false
+    color_order: BGR
+    rotation: 0°
+    
+    # 30 FPS Hardware Rendering
+    update_interval: 33ms 
+    
+    dimensions:
+      width: 240
+      height: 320
+
+    lambda: |-
+      int paddle_width = 50;
+      int paddle_height = 8;
+      int paddle_y = 300;
+      int paddle_x = id(player_paddle).state; 
+
+      // ----------------------------------------------------
+      // STATE 0: START SCREEN
+      // ----------------------------------------------------
+      if (id(game_state) == 0) {
+        it.fill(Color::BLACK);
+        it.print(120, 100, id(font_large), Color(0, 255, 255), TextAlign::CENTER, "PONG"); // Cyan
+        it.print(120, 180, id(font_main), Color::WHITE, TextAlign::CENTER, "PRESS ENCODER");
+        it.print(120, 210, id(font_main), Color::WHITE, TextAlign::CENTER, "TO START");
+      }
+
+      // ----------------------------------------------------
+      // STATE 1: PLAYING
+      // ----------------------------------------------------
+      else if (id(game_state) == 1) {
+        // Move the ball
+        id(ball_x) += id(ball_dx);
+        id(ball_y) += id(ball_dy);
+
+        // Wall Bounces (Left/Right)
+        if (id(ball_x) <= 0 || id(ball_x) >= 230) id(ball_dx) *= -1;
+        // Ceiling Bounce
+        if (id(ball_y) <= 0) id(ball_dy) *= -1;
+
+        // Paddle Collision Logic
+        if (id(ball_y) + 10 >= paddle_y && id(ball_y) <= paddle_y + paddle_height) {
+          if (id(ball_x) + 10 >= paddle_x && id(ball_x) <= paddle_x + paddle_width) {
+            id(ball_dy) *= -1.05; // Bounce up and slightly increase speed
+            id(ball_y) = paddle_y - 10; // Prevent getting stuck inside paddle
+            id(score) += 1;
+          }
+        }
+
+        // Floor Collision (Game Over)
+        if (id(ball_y) >= 320) {
+          id(game_state) = 2;
+        }
+
+        // Draw Game
+        it.fill(Color::BLACK);
+        
+        // Draw Paddle (Yellow)
+        it.filled_rectangle(paddle_x, paddle_y, paddle_width, paddle_height, Color(255, 255, 0));
+        
+        // Draw Ball (Red)
+        it.filled_rectangle(id(ball_x), id(ball_y), 10, 10, Color(255, 0, 0));
+        
+        // Draw Score (Cyan)
+        it.printf(5, 5, id(font_main), Color(0, 255, 255), "SCORE: %d", id(score));
+      }
+
+      // ----------------------------------------------------
+      // STATE 2: GAME OVER
+      // ----------------------------------------------------
+      else if (id(game_state) == 2) {
+        it.fill(Color(50, 0, 0)); // Dark Red Background
+        it.print(120, 100, id(font_large), Color::WHITE, TextAlign::CENTER, "GAME OVER");
+        it.printf(120, 160, id(font_main), Color(255, 255, 0), TextAlign::CENTER, "FINAL SCORE: %d", id(score)); // Yellow
+        it.print(120, 220, id(font_main), Color::WHITE, TextAlign::CENTER, "PRESS ENCODER");
+      }
+
+      // ----------------------------------------------------
+      // STATE 3: PAUSED (K0 Button)
+      // ----------------------------------------------------
+      else if (id(game_state) == 3) {
+        it.fill(Color(0, 0, 50)); // Dark Blue Background
+        it.print(120, 150, id(font_large), Color::WHITE, TextAlign::CENTER, "PAUSED");
+        it.print(120, 200, id(font_main), Color(0, 255, 255), TextAlign::CENTER, "PRESS K0 TO RESUME"); // Cyan
+      }
